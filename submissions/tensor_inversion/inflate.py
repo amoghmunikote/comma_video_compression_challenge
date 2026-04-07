@@ -200,20 +200,17 @@ def optimize_batch(
     seg_loss_val = 0.0
     pose_loss_val = 0.0
 
-    AVG_LAST_K = 10
+    AVG_LAST_K = 5
     f0_accum = torch.zeros_like(init_odd)
     f1_accum = torch.zeros_like(init_odd)
     avg_count = 0
 
     early_cutoff = int(0.3 * max(num_iters - 1, 1))
 
-    # Early stopping: when seg_loss is near-zero for PATIENCE consecutive
-    # iters after MIN_ES iterations, start accumulating for averaging then stop.
-    # This banks saved time for harder batches.
-    EARLY_STOP_MIN = 50
-    EARLY_STOP_SEG_THRESH = 1e-4
-    EARLY_STOP_POSE_THRESH = 4e-4
-    EARLY_STOP_PATIENCE = 5
+    EARLY_STOP_MIN = 30
+    EARLY_STOP_SEG_THRESH = 5e-4
+    EARLY_STOP_POSE_THRESH = 1e-3
+    EARLY_STOP_PATIENCE = 3
     converged_count = 0
     early_stop_triggered = False
     actual_iters = num_iters
@@ -406,13 +403,13 @@ def main():
 
     print(f"Processing {num_pairs} pairs at {W_cam}x{H_cam}, batch_size={batch_size}")
 
-    TARGET_ITERS = 150
-    MIN_ITERS = 60
+    TARGET_ITERS = 100
+    MIN_ITERS = 40
     LR = 1.2
     SEG_MARGIN = 0.1
     ALPHA = 120.0
     BETA = 0.20
-    WALL_BUDGET = 1400   # ~23.3 min inflate budget (conservative for CI safety)
+    WALL_BUDGET = 1400
 
     total_batches = (num_pairs + batch_size - 1) // batch_size
     avg_time_per_iter = None
