@@ -8,7 +8,6 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-
 class REN(nn.Module):
     def __init__(self, features=32):
         super().__init__()
@@ -29,12 +28,6 @@ class REN(nn.Module):
 
 MODEL = None
 
-def _load_f16_bz2(path):
-    with open(path, 'rb') as f:
-        data = bz2.decompress(f.read())
-    sd = torch.load(io.BytesIO(data), map_location=DEVICE, weights_only=True)
-    return {k: v.float() for k, v in sd.items()}
-
 def _load_int8_bz2(path):
     with open(path, 'rb') as f:
         raw = bz2.decompress(f.read())
@@ -52,25 +45,28 @@ def _load_int8_bz2(path):
         sd[name] = torch.from_numpy(data.astype(np.float32)).reshape(shape) * scale
     return sd
 
+def _load_f16_bz2(path):
+    with open(path, 'rb') as f:
+        data = bz2.decompress(f.read())
+    sd = torch.load(io.BytesIO(data), map_location=DEVICE, weights_only=True)
+    return {k: v.float() for k, v in sd.items()}
+
 def get_model(archive_dir=None):
     global MODEL
     if MODEL is not None:
         return MODEL
-    candidates = []
     for d in ([archive_dir] if archive_dir else []) + [os.path.join(HERE, 'archive'), HERE]:
-        candidates.append((os.path.join(d, 'ren_model.int8.bz2'), 'int8'))
-        candidates.append((os.path.join(d, 'ren_model.pt.bz2'), 'f16'))
-        candidates.append((os.path.join(d, 'ren_model.pt'), 'raw'))
-    for path, fmt in candidates:
-        if os.path.exists(path):
-            MODEL = REN(features=32).to(DEVICE).eval()
-            if fmt == 'int8':
-                MODEL.load_state_dict(_load_int8_bz2(path))
-            elif fmt == 'f16':
-                MODEL.load_state_dict(_load_f16_bz2(path))
-            else:
-                MODEL.load_state_dict(torch.load(path, map_location=DEVICE, weights_only=True))
-            return MODEL
+        for name, fmt in [('ren_model.int8.bz2', 'int8'), ('ren_model.pt.bz2', 'f16'), ('ren_model.pt', 'raw')]:
+            path = os.path.join(d, name)
+            if os.path.exists(path):
+                MODEL = REN(features=32).to(DEVICE).eval()
+                if fmt == 'int8':
+                    MODEL.load_state_dict(_load_int8_bz2(path))
+                elif fmt == 'f16':
+                    MODEL.load_state_dict(_load_f16_bz2(path))
+                else:
+                    MODEL.load_state_dict(torch.load(path, map_location=DEVICE, weights_only=True))
+                return MODEL
     raise FileNotFoundError("ren_model not found")
 
 
