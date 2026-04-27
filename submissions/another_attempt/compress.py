@@ -55,7 +55,7 @@ OUT_W, OUT_H = 1164, 874
 N_PAIRS_PER_FILE = 600
 COND_DIM = 48
 POSE_DIM = 6
-MASK_CRF = 63   # max AV1 quantization; mask is lossy but generator is trained on the noisy roundtrip
+MASK_CRF = 55   # max AV1 quantization; mask is lossy but generator is trained on the noisy roundtrip
 
 
 class Stage(Enum):
