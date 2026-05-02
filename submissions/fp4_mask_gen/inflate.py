@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """
-another_attempt/inflate.py
+fp4_mask_gen/inflate.py
 
 Format on disk (all files inside archive/):
   model.pt.br  FP4-quantized + brotli'd state dict for the generator.
-  mask.obu.br  AV1 CRF=63 OBU of NET_W×NET_H mask frames (one per pair).
+  mask.obu.br  Lossless AV1 OBU of MASK_STORE_W×MASK_STORE_H mask keyframes
+               (1 per K_TEMPORAL pairs, 5-class gray).
   pose.bin.br  Brotli'd binary: 12 fp32 (per-dim mn, mx) + N_PAIRS*6 uint16.
 """
 import io, os, sys, tempfile
@@ -19,11 +20,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-NET_W, NET_H = 512, 384
-OUT_W, OUT_H = 1164, 874
+NET_W, NET_H     = 512, 384
+OUT_W, OUT_H     = 1164, 874
 N_PAIRS_PER_FILE = 600
-COND_DIM = 48
-POSE_DIM = 6
+COND_DIM         = 48
+POSE_DIM         = 6
+K_TEMPORAL       = 1
+MASK_STORE_H     = 192
+MASK_STORE_W     = 256
 
 
 # ─── FP4 dequantization ───────────────────────────────────────────────────────
@@ -65,14 +69,13 @@ def get_decoded_state_dict(payload_data, device):
     return sd
 
 
-# ─── Pose codec ───────────────────────────────────────────────────────────────
+# ─── Pose codec (qpose14 fixed-scale) ─────────────────────────────────────────
 def decode_pose_bin(payload: bytes) -> torch.Tensor:
-    header = np.frombuffer(payload[: 12 * 4], dtype=np.float32)
-    mn, mx = header[:POSE_DIM].copy(), header[POSE_DIM : 2 * POSE_DIM].copy()
-    body = np.frombuffer(payload[12 * 4 :], dtype=np.uint16).reshape(-1, POSE_DIM).astype(np.float32)
-    rng = np.maximum(mx - mn, 1e-9)
-    pose = mn[None, :] + body / 65535.0 * rng[None, :]
-    return torch.from_numpy(pose).float().contiguous()
+    q = np.frombuffer(payload, dtype=np.uint16).reshape(-1, POSE_DIM).copy()
+    out = np.empty(q.shape, dtype=np.float32)
+    out[:, 0]  = q[:, 0].astype(np.float32) / 512.0 + 20.0
+    out[:, 1:] = q[:, 1:].view(np.int16).astype(np.float32) / 2048.0
+    return torch.from_numpy(out).float().contiguous()
 
 
 # ─── Architecture (inference-only) — must match compress.py exactly ──────────
@@ -146,16 +149,6 @@ class SharedMaskDecoder(nn.Module):
         z      = self.up(self.down_block(self.down_conv(s)))
         return self.fuse_block(self.fuse(torch.cat([z, s], dim=1)))
 
-class Frame2StaticHead(nn.Module):
-    def __init__(self, in_ch, hidden=52, depth_mult=1):
-        super().__init__()
-        self.block1 = SepResBlock(in_ch, depth_mult=depth_mult)
-        self.block2 = SepResBlock(in_ch, depth_mult=depth_mult)
-        self.pre    = SepConvGNAct(in_ch, hidden, depth_mult=depth_mult)
-        self.head   = QConv2d(hidden, 3, 1)
-    def forward(self, feat):
-        return torch.sigmoid(self.head(self.pre(self.block2(self.block1(feat))))) * 255.0
-
 class FrameHead(nn.Module):
     def __init__(self, in_ch, cond_dim=COND_DIM, hidden=52, depth_mult=1):
         super().__init__()
@@ -172,13 +165,14 @@ class JointFrameGenerator(nn.Module):
         self.shared_trunk = SharedMaskDecoder(num_classes, emb_dim=6, c1=56, c2=64, depth_mult=depth_mult)
         self.pose_mlp = nn.Sequential(
             nn.Linear(pose_dim, cond_dim), nn.SiLU(), nn.Linear(cond_dim, cond_dim))
-        self.frame1_head = FrameHead(in_ch=56, cond_dim=cond_dim, hidden=52, depth_mult=depth_mult)
-        self.frame2_head = Frame2StaticHead(in_ch=56, hidden=52, depth_mult=depth_mult)
+        self.frame1_head  = FrameHead(in_ch=56, cond_dim=cond_dim, hidden=52, depth_mult=depth_mult)
+        self.frame2_head  = FrameHead(in_ch=56, cond_dim=cond_dim, hidden=52, depth_mult=depth_mult)
 
-    def forward(self, mask2, pose6):
-        coords = make_coord_grid(mask2.shape[0], NET_H, NET_W, mask2.device, torch.float32)
-        feat   = self.shared_trunk(mask2, coords)
-        return self.frame1_head(feat, self.pose_mlp(pose6)), self.frame2_head(feat)
+    def forward(self, mask2, pose6, pair_idx=None):
+        coords    = make_coord_grid(mask2.shape[0], NET_H, NET_W, mask2.device, torch.float32)
+        feat      = self.shared_trunk(mask2, coords)
+        pose_cond = self.pose_mlp(pose6)
+        return self.frame1_head(feat, pose_cond), self.frame2_head(feat, pose_cond)
 
 def make_coord_grid(batch, height, width, device, dtype):
     ys = (torch.arange(height, device=device, dtype=dtype) + 0.5) / height
@@ -211,38 +205,52 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     files  = [l.strip() for l in file_list_path.read_text().splitlines() if l.strip()]
 
-    with open(data_dir / "model.pt.br", "rb") as f:
-        weights_data = brotli.decompress(f.read())
+    # Model is always in the archive; mask+pose may be embedded in this file.
+    model_br = (data_dir / "model.pt.br").read_bytes()
+    try:
+        mask_br = _MASK_BR  # noqa: F821  – injected by compress.py embed step
+        pose_br = _POSE_BR  # noqa: F821
+    except NameError:
+        # Fallback for standalone / test runs: read from data_dir
+        mask_br = (data_dir / "mask.obu.br").read_bytes()
+        pose_br = (data_dir / "pose.bin.br").read_bytes()
+
+    weights_data = brotli.decompress(model_br)
     generator = JointFrameGenerator().to(device)
     generator.load_state_dict(get_decoded_state_dict(weights_data, device), strict=True)
     generator.eval()
 
     with tempfile.NamedTemporaryFile(suffix=".obu", delete=False) as tmp:
-        tmp.write(brotli.decompress(open(data_dir / "mask.obu.br", "rb").read()))
+        tmp.write(brotli.decompress(mask_br))
         tmp_path = tmp.name
-    mask_frames_all = load_mask_video(tmp_path)
+    kf_masks_all = load_mask_video(tmp_path)  # [N_KF_TOTAL, MASK_STORE_H, MASK_STORE_W]
     os.remove(tmp_path)
 
-    pose_payload    = brotli.decompress(open(data_dir / "pose.bin.br", "rb").read())
-    pose_frames_all = decode_pose_bin(pose_payload)
+    pose_frames_all = decode_pose_bin(brotli.decompress(pose_br))  # [N_PAIRS_TOTAL, 6]
 
-    batch_size = 4
-    cursor     = 0
+    batch_size    = 4
+    kf_cursor     = 0
+    pose_cursor   = 0
+    n_kf_per_file = N_PAIRS_PER_FILE // K_TEMPORAL
 
     with torch.inference_mode():
         for file_name in files:
-            base_name  = os.path.splitext(file_name)[0]
-            raw_out    = out_dir / f"{base_name}.raw"
-            file_masks = mask_frames_all[cursor : cursor + N_PAIRS_PER_FILE]
-            file_poses = pose_frames_all[cursor : cursor + N_PAIRS_PER_FILE]
-            cursor    += N_PAIRS_PER_FILE
+            base_name = os.path.splitext(file_name)[0]
+            raw_out   = out_dir / f"{base_name}.raw"
+
+            file_kf    = kf_masks_all[kf_cursor : kf_cursor + n_kf_per_file]
+            file_masks = file_kf.repeat_interleave(K_TEMPORAL, dim=0)[:N_PAIRS_PER_FILE]
+            file_poses = pose_frames_all[pose_cursor : pose_cursor + N_PAIRS_PER_FILE]
+            kf_cursor   += n_kf_per_file
+            pose_cursor += N_PAIRS_PER_FILE
 
             with open(raw_out, "wb") as f_out:
-                for i in tqdm(range(0, file_masks.shape[0], batch_size), desc=f"Decoding {file_name}"):
-                    m = file_masks[i:i+batch_size].to(device).long()
-                    p = file_poses[i:i+batch_size].to(device).float()
+                for i in tqdm(range(0, N_PAIRS_PER_FILE, batch_size), desc=f"Decoding {file_name}"):
+                    m    = file_masks[i:i+batch_size].to(device).long()
+                    p    = file_poses[i:i+batch_size].to(device).float()
+                    pidx = torch.arange(i, i + m.shape[0], device=device) % K_TEMPORAL
 
-                    f1, f2 = generator(m, p)
+                    f1, f2 = generator(m, p, pidx)
                     f1_up  = F.interpolate(f1, (OUT_H, OUT_W), mode="bilinear", align_corners=False)
                     f2_up  = F.interpolate(f2, (OUT_H, OUT_W), mode="bilinear", align_corners=False)
 
