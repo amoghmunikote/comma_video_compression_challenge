@@ -144,6 +144,36 @@ The official evaluation has a time limit of 30 minutes. If your inflation script
    <td>
    </td>
    <td>
+    0.31
+   </td>
+   <td>
+    qpose14_r55_segactions_minp
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/79" target="_blank">
+     #79
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    0.32
+   </td>
+   <td>
+    qzs3_tile_delta_r147
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/77" target="_blank">
+     #77
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
     0.32
    </td>
    <td>
@@ -192,6 +222,21 @@ The official evaluation has a time limit of 30 minutes. If your inflation script
     0.33
    </td>
    <td>
+    qpose14_poseq6
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/76" target="_blank">
+     #76
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    0.33
+   </td>
+   <td>
     unified_brotli
    </td>
    <td>
@@ -212,6 +257,21 @@ The official evaluation has a time limit of 30 minutes. If your inflation script
    <td>
     <a href="https://github.com/commaai/comma_video_compression_challenge/pull/55" target="_blank">
      #55
+    </a>
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+    0.37
+   </td>
+   <td>
+    ph4ntom_drv
+   </td>
+   <td>
+    <a href="https://github.com/commaai/comma_video_compression_challenge/pull/74" target="_blank">
+     #74
     </a>
    </td>
   </tr>
